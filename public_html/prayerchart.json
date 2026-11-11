@@ -1,0 +1,24 @@
+{
+  "name": "PrayerChart",
+  "author": "Elfan Nofiari",
+  "canonicalUrl": "https://prayerchart.com/",
+  "purpose": "Interactive annual visualization of Islamic prayer times",
+  "prayers": ["Fajr", "Sunrise", "Dhuhr", "Asr", "Maghrib", "Isha"],
+  "selection": {
+    "cityHashExample": "#Los+Angeles",
+    "countryHashExample": "#Indonesia",
+    "matching": "case-insensitive",
+    "unknownHashBehavior": "remove hash and use browser timezone auto-detection",
+    "noHashBehavior": "select supported city with same or closest current UTC offset"
+  },
+  "timeHandling": {
+    "format": "24-hour",
+    "dstAware": true,
+    "timezoneDisplay": "current effective UTC offset"
+  },
+  "interaction": {
+    "chartHover": "preview a date",
+    "chartDrag": "select a date",
+    "autoButton": "return to browser-timezone-based selection"
+  }
+}

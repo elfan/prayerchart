@@ -46,10 +46,15 @@ Times are approximate and shown in 24-hour format. For the exact times used for 
 
 ```
 public_html/
-  index.html    The whole app: markup, styles and JavaScript in one file
+  index.html         Page markup, SEO/social meta tags and JSON-LD structured data
+  css/style.css      All styles
+  js/app.js          Prayer-time calculation, chart rendering and interaction
+  prayerchart.json   Machine-readable description of the site for agents and crawlers
 ```
 
 There is no build step and nothing to install. The only outside resource is Google Fonts (Playfair Display and DM Mono).
+
+The JSON-LD block stays inline in `index.html` because search engines only read structured data embedded in the page.
 
 ## Running locally
 

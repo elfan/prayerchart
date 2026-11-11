@@ -1,0 +1,1183 @@
+// PrayerChart attribution and build fingerprint
+const PRAYERCHART_AUTHOR = 'Elfan Nofiari';
+const PRAYERCHART_ORIGIN = 'https://prayerchart.com';
+const PC_BUILD_ID = 'PC-EN-7F3A';
+const ELFN_SOLAR_EPOCH = 2451545;
+
+// Harmless DOM fingerprint for provenance checks.
+document.documentElement.dataset.pcBuild = PC_BUILD_ID;
+document.documentElement.dataset.pcAuthor = PRAYERCHART_AUTHOR;
+
+// ─── CITIES ──────────────────────────────────
+const CITIES = {
+  'San Francisco': { country:'USA',          lat:37.775, lon:-122.418, tz:-8,  fa:15,   ia:15,  dst:'us'     },
+  'New York':      { country:'USA',          lat:40.713, lon:-74.006,  tz:-5,  fa:15,   ia:15,  dst:'us'     },
+  'London':        { country:'UK',           lat:51.507, lon:-0.127,   tz:0,   fa:12,   ia:12,  dst:'eu'     },
+  'Gaza':          { country:'Palestine',    lat:31.500, lon:34.467,   tz:2,   fa:18,   ia:17,  dst:'gaza'   },
+  'Mecca':         { country:'Saudi Arabia', lat:21.389, lon:39.857,   tz:3,   fa:18,   ia:17,  dst:null     },
+  'Jakarta':       { country:'Indonesia',    lat:-6.200, lon:106.816,  tz:7,   fa:18,   ia:17,  dst:null     },
+  'Kuala Lumpur':  { country:'Malaysia',     lat:3.147,  lon:101.694,  tz:8,   fa:18,   ia:17,  dst:null     },
+  'Sydney':        { country:'Australia',    lat:-33.869,lon:151.209,  tz:10,  fa:18,   ia:17,  dst:'au'      },
+};
+
+// ─── DST RULES (all for year 2025) ───────────────────────────────
+// Returns 1 if DST is active on given month/day, else 0.
+//
+// US (California): DST starts 2nd Sunday of March, ends 1st Sunday of November
+// EU (London/BST): DST starts last Sunday of March, ends last Sunday of October
+// Turkey: abolished DST in 2016 — stays on UTC+3 year-round (no DST)
+
+function nthSundayOfMonth(year, month, nth) {
+  const d = new Date(year, month - 1, 1);
+  const firstSunday = (7 - d.getDay()) % 7;
+  if(nth > 0) return firstSunday + 1 + (nth - 1) * 7;
+  const lastDay = new Date(year, month, 0).getDate();
+  return lastDay - new Date(year, month - 1, lastDay).getDay();
+}
+
+function nthWeekdayOfMonth(year, month, weekday, nth) {
+  const d = new Date(year, month - 1, 1);
+  const diff = (weekday - d.getDay() + 7) % 7;
+  if(nth > 0) return diff + 1 + (nth - 1) * 7;
+  const lastDay = new Date(year, month, 0).getDate();
+  return lastDay - ((new Date(year, month-1, lastDay).getDay() - weekday + 7) % 7);
+}
+
+function dstOffsetByRule(rule, year, month, day){
+  if(!rule) return 0;
+  const doy = mdDoy(month, day);
+  if(rule==='us'){
+    const s=nthSundayOfMonth(year,3,2), e=nthSundayOfMonth(year,11,1);
+    return(doy>=mdDoy(3,s)&&doy<mdDoy(11,e))?1:0;
+  }
+  if(rule==='eu'){
+    const s=nthSundayOfMonth(year,3,-1), e=nthSundayOfMonth(year,10,-1);
+    return(doy>=mdDoy(3,s)&&doy<mdDoy(10,e))?1:0;
+  }
+  if(rule==='gaza'){
+    const s=nthWeekdayOfMonth(year,3,5,-1), e=nthSundayOfMonth(year,10,-1);
+    return(doy>=mdDoy(3,s)&&doy<mdDoy(10,e))?1:0;
+  }
+  if(rule==='iran'){
+    const s=nthWeekdayOfMonth(year,3,3,-1), e=nthWeekdayOfMonth(year,9,3,-1);
+    return(doy>=mdDoy(3,s)&&doy<mdDoy(9,e))?1:0;
+  }
+  if(rule==='au'){
+    // Australia (NSW/VIC): first Sunday of October → first Sunday of April
+    const sStart=nthSundayOfMonth(year,10,1), sEnd=nthSundayOfMonth(year,4,1);
+    const dstStart=mdDoy(10,sStart), dstEnd=mdDoy(4,sEnd);
+    // DST wraps around year-end: active Oct→Dec and Jan→Apr
+    return(doy>=dstStart || doy<dstEnd)?1:0;
+  }
+  return 0;
+}
+
+function dstOffset(city, year, month, day) {
+  const rule = CITIES[city] ? CITIES[city].dst : null;
+  return dstOffsetByRule(rule, year, month, day);
+}
+
+function calc(city,Y,M,d){
+  const c=CITIES[city],j2=jd(Y,M,d),{dec,eqt}=sun(j2);
+  const dst = dstOffset(city, Y, M, d);
+  const tz  = c.tz + dst;                        // effective UTC offset
+  const noon=12-eqt-c.lon/15+tz;
+  const fH=ha(c.lat,dec,-c.fa), srH=ha(c.lat,dec,-0.833);
+  const aH=asrha(c.lat,dec),    iH=ha(c.lat,dec,-c.ia);
+  const sunrise  = srH ? noon-srH : null;
+  const maghrib  = srH ? noon+srH : null;
+  let fajr = fH  ? noon-fH  : null;
+  let isha  = iH  ? noon+iH  : null;
+  let isFallback = false;
+
+  // High-latitude handling:
+  // Cities like Oulu/Helsinki can have periods where the sun never reaches
+  // the standard Fajr/Isha angle. If we only fallback on the missing days,
+  // the annual curve visually snaps between two different calculation methods.
+  // For marked highLat cities, use the short-night one-seventh approximation
+  // consistently for Fajr/Isha whenever sunrise/maghrib exist.
+  if(c.highLat && sunrise!==null && maghrib!==null){
+    const fb = calcFallback(noon, sunrise, maghrib);
+    fajr = fb.fajr;
+    isha = fb.isha;
+    isFallback = true;
+  } else if((fajr===null || isha===null) && sunrise!==null && maghrib!==null){
+    const fb = calcFallback(noon, sunrise, maghrib);
+    if(fajr===null){ fajr=fb.fajr; isFallback=true; }
+    if(isha===null){ isha=fb.isha; isFallback=true; }
+  }
+  return{ fajr, sunrise, dhuhr:noon, asr:aH?noon+aH:null, maghrib, isha, isFallback, dst };
+}
+
+const PR = [
+  { key:'fajr',    label:'Fajr',    ar:'الفجر',  col:'#5ba8e0', dash:false },
+  { key:'sunrise', label:'Sunrise', ar:'الشروق', col:'#c8a840', dash:true  },
+  { key:'dhuhr',   label:'Dhuhr',   ar:'الظهر',  col:'#f0d060', dash:false },
+  { key:'asr',     label:'Asr',     ar:'العصر',  col:'#58c07a', dash:false },
+  { key:'maghrib', label:'Maghrib', ar:'المغرب', col:'#e06038', dash:false },
+  { key:'isha',    label:'Isha',    ar:'العشاء',  col:'#9070e0', dash:false },
+];
+
+const MS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const MN = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const DN = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+
+// ─── DATE HELPERS (must come before DST which uses mdDoy) ────────
+function doyMD(doy){ const m=[31,28,31,30,31,30,31,31,30,31,30,31]; let d=doy; for(let i=0;i<12;i++){if(d<m[i])return{mo:i+1,dy:d+1};d-=m[i];} return{mo:12,dy:31}; }
+function mdDoy(mo,dy){ return[0,31,59,90,120,151,181,212,243,273,304,334][mo-1]+dy-1; }
+
+// ─── RAMADAN ─────────────────────────────────
+// Calculates Ramadan dates using the tabular Islamic (Hijri) calendar.
+// JD of 1 Ramadan for Hijri year H (Kuwaiti algorithm)
+function _jdRamadan1(H){ return Math.ceil(29.5*8)+(H-1)*354+Math.ceil((11*H+3)/30)+1948439; }
+function _jdToGreg(jd){ let l=jd+68569; const n=Math.floor(4*l/146097); l=l-Math.floor((146097*n+3)/4); const i=Math.floor(4000*(l+1)/1461001); l=l-Math.floor(1461*i/4)+31; const j=Math.floor(80*l/2447); const day=l-Math.floor(2447*j/80); l=Math.floor(j/11); const month=j+2-12*l; const year=100*(n-49)+i+l; return{year,month,day}; }
+
+// Per-country Ramadan offsets relative to tabular calculation.
+// +1 = starts one day later (local moon sighting / conservative authority)
+// -1 = starts one day earlier (follows Saudi Arabia announcement early)
+//  0 = follows tabular/Saudi (default)
+const RAMADAN_OFFSETS = {
+  'Saudi Arabia': 0,   // tabular = Saudi official
+  'UAE':          0,
+  'Qatar':        0,
+  'Kuwait':       0,
+  'Iraq':         0,
+  'Palestine':    0,
+  'Jordan':       0,
+  'Lebanon':      0,
+  'Egypt':        0,   // Egypt uses sighting — typically same as Saudi
+  'Morocco':      0,
+  'Turkey':       0,
+  'Iran':         1,   // Iran uses its own calculation, typically +1
+  'Pakistan':     1,   // Pakistan moon sighting often +1 vs Saudi
+  'Afghanistan':  1,
+  'Bangladesh':   1,
+  'India':        1,
+  'Sri Lanka':    1,
+  'Indonesia':    1,   // PBNU/Muhammadiyah split; +1 most common
+  'Malaysia':     1,
+  'Singapore':    1,
+  'Philippines':  1,
+  'UK':           0,   // follows Saudi/ISNA
+  'USA':          0,   // ISNA follows Saudi
+  'Canada':       0,
+  'France':       0,
+  'Germany':      0,
+  'Netherlands':  0,
+  'Belgium':      0,
+  'Spain':        0,
+  'Italy':        0,
+  'Greece':       0,
+  'Austria':      0,
+  'Sweden':       0,
+  'Norway':       0,
+  'Denmark':      0,
+  'Poland':       0,
+  'Russia':       0,
+  'China':        1,
+  'Japan':        0,
+  'South Korea':  0,
+  'Thailand':     1,
+  'Uzbekistan':   1,
+  'Nigeria':      0,   // Nigeria follows Saudi
+  'Kenya':        0,
+  'Ethiopia':     0,
+  'Ghana':        0,
+  'Senegal':      0,
+  'Mexico':       0,
+  'Brazil':       0,
+  'Argentina':    0,
+  'Australia':    0,
+  'New Zealand':  0,
+};
+
+function ramadanOffset(){
+  const entry = city==='__custom__' && customCity ? customCity : CITIES[city];
+  const country = entry ? entry.country : '';
+  return RAMADAN_OFFSETS[country] ?? 0;
+}
+
+function ramadanDoys(gYear){
+  const offset = ramadanOffset();
+  const segments = [];
+  const Happrox = Math.floor((gYear-622)*33/32);
+  for(let H=Happrox-2; H<=Happrox+2; H++){
+    const s = _jdToGreg(_jdRamadan1(H) + offset);
+    const e = _jdToGreg(_jdRamadan1(H) + 29 + offset);
+    if(e.year < gYear || s.year > gYear) continue;
+    const startDoy = s.year===gYear ? mdDoy(s.month,s.day) : 0;
+    const endDoy   = e.year===gYear ? mdDoy(e.month,e.day) : 364;
+    segments.push({ startDoy, endDoy,
+      labelStart:{mo:s.month, dy:s.day, yr:s.year},
+      labelEnd:  {mo:e.month, dy:e.day, yr:e.year} });
+  }
+  return segments;
+}
+
+function inRamadanDoy(doy){
+  return ramadanDoys(new Date().getFullYear()).some(r => doy >= r.startDoy && doy <= r.endDoy);
+}
+function cityNow(){
+  const now = new Date();
+  const entry = CITIES[city];
+  const baseTz = entry ? entry.tz : 0;
+  // First pass: get approximate city date using base tz (no DST)
+  const approxMs = now.getTime() + baseTz * 3600000;
+  const approxDate = new Date(approxMs);
+  const mo = approxDate.getUTCMonth()+1, dy = approxDate.getUTCDate(), yr = approxDate.getUTCFullYear();
+  // Now get DST offset using city local date
+  const dstOff = entry ? dstOffsetByRule(entry.dst, yr, mo, dy) : 0;
+  const tz = baseTz + dstOff;
+  // Final city time using correct offset
+  const cityMs = now.getTime() + tz * 3600000;
+  const cityDate = new Date(cityMs);
+  const doy = mdDoy(cityDate.getUTCMonth()+1, cityDate.getUTCDate());
+  const nowH = cityDate.getUTCHours() + cityDate.getUTCMinutes()/60 + cityDate.getUTCSeconds()/3600;
+  return { doy, nowH };
+}
+function todayDoy(){ return cityNow().doy; }
+
+// ─── MATHS ───────────────────────────────────
+const Rad=d=>d*Math.PI/180, Deg=r=>r*180/Math.PI;
+function jd(Y,M,d){ if(M<=2){Y--;M+=12;} const A=Math.floor(Y/100),B=2-A+Math.floor(A/4); return Math.floor(365.25*(Y+4716))+Math.floor(30.6001*(M+1))+d+B-1524.5; }
+function sun(j){ const n=j-ELFN_SOLAR_EPOCH,g=Rad(357.529+0.9856003*n),q=280.459+0.9856474*n; const L=Rad(q+1.915*Math.sin(g)+0.02*Math.sin(2*g)); const e=Rad(23.439-3.6e-7*n),sl=Math.sin(L); const ra=Deg(Math.atan2(Math.cos(e)*sl,Math.cos(L)))/15; return{dec:Deg(Math.asin(Math.sin(e)*sl)),eqt:q/15-((ra%24)+24)%24}; }
+function ha(lat,dec,ang){ const n=Math.sin(Rad(ang))-Math.sin(Rad(lat))*Math.sin(Rad(dec)); const d=Math.cos(Rad(lat))*Math.cos(Rad(dec)),v=n/d; return Math.abs(v)>1?null:Deg(Math.acos(v))/15; }
+function asrha(lat,dec){ return ha(lat,dec,Deg(Math.atan(1/(1+Math.tan(Rad(Math.abs(lat-dec))))))); }
+function calcFallback(noon,sunrise,maghrib){ if(!sunrise||!maghrib)return{fajr:null,isha:null}; const nd=(sunrise+24)-maghrib; return{fajr:maghrib+nd*(5/7),isha:maghrib+nd*(2/7)}; }
+function fmt(h){ if(h===null)return{t:'—',ap:''}; h=((h%24)+24)%24; let hh=Math.floor(h),mm=Math.round((h-hh)*60); if(mm===60){hh++;mm=0;} hh=hh%24; return{t:`${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}`,ap:''}; }
+
+
+function utcLabelForEntry(entry, doyOverride=null){
+  if(!entry) return '';
+  const now = new Date();
+  const year = now.getFullYear();
+  const doy = doyOverride ?? mdDoy(now.getMonth()+1, now.getDate());
+  const {mo,dy} = doyMD(doy);
+  const dst = dstOffsetByRule(entry.dst, year, mo, dy);
+  const tz = entry.tz + dst;
+  const sign = tz < 0 ? '-' : '+';
+  const abs = Math.abs(tz);
+  const absH = Math.floor(abs);
+  const absM = Math.round((abs - absH) * 60);
+  return 'UTC' + sign + absH + (absM ? ':' + String(absM).padStart(2,'0') : '');
+}
+
+function effectiveUtcLabel(cityName, doyOverride=null){
+  const entry = CITIES[cityName] || WORLD_CITIES.find(c=>c.name===cityName);
+  return utcLabelForEntry(entry, doyOverride);
+}
+
+function currentUtcSortValue(entry, doyOverride=null){
+  if(!entry) return 0;
+  const now = new Date();
+  const year = now.getFullYear();
+  const doy = doyOverride ?? mdDoy(now.getMonth()+1, now.getDate());
+  const {mo,dy} = doyMD(doy);
+  return entry.tz + dstOffsetByRule(entry.dst, year, mo, dy);
+}
+
+
+function nextPrayer(d,nowH){ for(const{key}of PR){const t=d[key];if(t===null)continue;if(((t%24)+24)%24>nowH)return key;} return PR[0].key; }
+function countdownStr(d,key,nowH){ const t=d[key];if(t===null)return''; let diff=(((t%24)+24)%24)-nowH; if(diff<0)diff+=24; const h=Math.floor(diff),m=Math.round((diff-h)*60); return h===0?`${m}m`:`${h}h ${String(m).padStart(2,'0')}m`; }
+
+// ─── CHART GEOMETRY ──────────────────────────
+// SVG canvas
+const W=760, H=480;
+// Chart area margins — extra right margin for mirrored time labels
+const ML=46, MR=44, MT=52, MB=72;
+const CW=W-ML-MR, CH=H-MT-MB;
+
+// Time range shown on Y axis (hours)
+const T_MIN=0.0, T_MAX=26.0;
+
+function xOf(doy) { return ML + (doy/364)*CW; }
+function yOf_raw(h) {
+  if(h===null) return null;
+  return MT + (1-(h-T_MIN)/(T_MAX-T_MIN))*CH;
+}
+function yOfPrayer(key, rawH){
+  if(rawH===null) return null;
+  let h=((rawH%24)+24)%24;
+  // High-latitude cities can have Maghrib/Isha after midnight.
+  // Draw those as 24+h so the curve stays continuous near the top,
+  // instead of wrapping to 00:xx at the bottom of the chart.
+  if((key==='isha' || key==='maghrib') && (rawH>=24 || h<3)) h=24+h;
+  return yOf_raw(h);
+}
+function yOf(h)   {
+  if(h===null) return null;
+  if(h<0) h=((h%24)+24)%24;
+  else if(h>=25) h=h%24;
+  return yOf_raw(h);
+}
+function doyFromX(x) { return Math.round(Math.max(0,Math.min(364,(x-ML)/CW*364))); }
+
+// ─── STATE ───────────────────────────────────
+let city='San Francisco', allData=[], hoverDoy=null, dragging=false;
+let needleDoy=todayDoy();
+
+function precompute(){
+  allData=[];
+  const Y = new Date().getFullYear();
+  for(let doy=0;doy<365;doy++){
+    const{mo,dy}=doyMD(doy);
+    allData.push({doy,...calc(city,Y,mo,dy)});
+  }
+}
+
+// ─── STATIC LAYER ────────────────────────────
+let staticSVG='';
+function buildStatic(){
+  let h='';
+
+  // Defs
+  h+=`<defs>
+    <metadata id="pc-origin">
+      PrayerChart by Elfan Nofiari · https://prayerchart.com · PC-EN-7F3A
+    </metadata>
+    <linearGradient id="nightgrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#080c18"/>
+      <stop offset="100%" stop-color="#07090e"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="glow2">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <clipPath id="chartClip">
+      <rect x="${ML}" y="${MT}" width="${CW}" height="${CH}"/>
+    </clipPath>
+
+  </defs>`;
+
+  // Background
+  h+=`<rect width="${W}" height="${H}" fill="#07090e" rx="16" data-pc-build="${PC_BUILD_ID}" data-pc-author="${PRAYERCHART_AUTHOR}"/>`;
+  h+=`<rect x="${ML}" y="${MT}" width="${CW}" height="${CH}" fill="url(#nightgrad)" rx="2"/>`;
+
+  // ── Ramadan highlight band(s) — may be 1 or 2 segments ──
+  ramadanDoys(new Date().getFullYear()).forEach(ramadan => {
+    const rx1 = xOf(ramadan.startDoy);
+    const rx2 = xOf(ramadan.endDoy);
+    // Vertical band across full chart height
+    h+=`<rect x="${rx1.toFixed(1)}" y="${MT}" width="${Math.max(0,rx2-rx1).toFixed(1)}" height="${CH}"
+      fill="rgba(160,80,255,0.22)" clip-path="url(#chartClip)"/>`;
+    // Labels below x-axis — show true start/end dates even if they fall outside this year
+    const {mo:sm, dy:sd, yr:sy} = ramadan.labelStart;
+    const {mo:em, dy:ed, yr:ey} = ramadan.labelEnd;
+    const rmidX = (Math.max(xOf(0), Math.min(xOf(364), (rx1+rx2)/2))).toFixed(1);
+    const yearSuffix = sy !== new Date().getFullYear() ? ` '${String(sy).slice(-2)}` : '';
+    const yearSuffixE = ey !== new Date().getFullYear() ? ` '${String(ey).slice(-2)}` : '';
+    h+=`<text x="${rmidX}" y="${(MT+CH+38).toFixed(1)}" text-anchor="middle"
+      font-size="11" font-family="DM Mono,monospace" font-weight="500"
+      fill="rgba(200,150,255,0.85)">Ramadan</text>`;
+    h+=`<text x="${rmidX}" y="${(MT+CH+52).toFixed(1)}" text-anchor="middle"
+      font-size="10" font-family="DM Mono,monospace"
+      fill="rgba(180,120,240,0.65)">${MS[sm-1]} ${sd}${yearSuffix}–${MS[em-1]} ${ed}${yearSuffixE}</text>`;
+  });
+
+  // ── Horizontal time grid — every single hour, all labeled ──
+  for(let t=0; t<=24; t++){
+    const y=yOf(t);
+    if(y===null || y<MT || y>MT+CH) continue;
+    const isMajor=(t%6===0);   // bolder every 6h: 06,12,18
+    const isMid  =(t%3===0);   // medium every 3h: 03,09,15,21
+
+    // Grid line
+    h+=`<line x1="${ML}" y1="${y.toFixed(1)}" x2="${ML+CW}" y2="${y.toFixed(1)}"
+      stroke="${isMajor?'rgba(255,255,255,0.30)':isMid?'rgba(255,255,255,0.16)':'rgba(255,255,255,0.16)'}"
+      stroke-width="${isMajor?1.2:isMid?1.2:0.75}"/>`;
+
+    // Left label — every hour, fully legible (skip 00)
+    if(t===0){ continue; }
+    const label=`${t<10?'0'+t:t}`;
+    const labelOpacity = isMajor?1.0 : isMid?0.65 : 0.35;
+    h+=`<text x="${ML-5}" y="${(y+3.5).toFixed(1)}" text-anchor="end"
+      font-size="${isMajor?19:isMid?13:8.5}" fill="rgba(230,210,160,${labelOpacity})"
+      font-family="DM Mono,monospace">${label}</text>`;
+
+    // Right label — every hour (mirrored)
+    h+=`<text x="${ML+CW+5}" y="${(y+3.5).toFixed(1)}" text-anchor="start"
+      font-size="${isMajor?19:isMid?13:8.5}" fill="rgba(230,210,160,${labelOpacity*0.85})"
+      font-family="DM Mono,monospace">${label}</text>`;
+  }
+
+  // Vertical month dividers + X-axis month labels
+  const mStarts=[0,31,59,90,120,151,181,212,243,273,304,334];
+  mStarts.forEach((doy,mi)=>{
+    const x=xOf(doy);
+    h+=`<line x1="${x.toFixed(1)}" y1="${MT}" x2="${x.toFixed(1)}" y2="${MT+CH}"
+      stroke="rgba(220,170,60,0.15)" stroke-width="1"/>`;
+    // Month label centred in its band
+    const nextDoy = mi<11 ? mStarts[mi+1] : 365;
+    const midX=xOf((doy+nextDoy)/2);
+    h+=`<text x="${midX.toFixed(1)}" y="${MT+CH+22}" text-anchor="middle"
+      font-size="16" font-family="DM Mono,monospace" font-weight="500"
+      fill="rgba(235,195,90,0.95)">${MS[mi]}</text>`;
+  });
+
+  // Chart border
+  h+=`<rect x="${ML}" y="${MT}" width="${CW}" height="${CH}"
+    fill="none" stroke="rgba(200,151,58,0.35)" stroke-width="1" rx="2"/>`;
+
+  return h;
+}
+
+// ─── DYNAMIC LAYER ───────────────────────────
+function buildDynamic(){
+  const activeDoy = hoverDoy !== null ? hoverDoy : needleDoy;
+  const isHovering = hoverDoy !== null;
+  let h='';
+
+  // ── DST band — thin bar at bottom of chart showing DST-active period ──
+  const dstDays = allData.filter(d=>d.dst===1);
+  if(dstDays.length > 0){
+    // Find contiguous DST ranges (in case of split, e.g. southern hemisphere)
+    let segments=[], start=null;
+    dstDays.forEach((d,i)=>{
+      if(start===null) start=d.doy;
+      const next=dstDays[i+1];
+      if(!next || next.doy > d.doy+2){
+        segments.push({from:start, to:d.doy});
+        start=null;
+      }
+    });
+    segments.forEach(({from,to})=>{
+      const x1=xOf(from), x2=xOf(to);
+      // Subtle golden band at very bottom of chart
+      h+=`<rect x="${x1.toFixed(1)}" y="${(MT+CH-4).toFixed(1)}" width="${(x2-x1).toFixed(1)}" height="4"
+        fill="rgba(200,151,58,0.3)" clip-path="url(#chartClip)"/>`;
+
+    });
+  }
+  const srPts = allData.filter(d=>d.sunrise!==null).map(d=>`${xOf(d.doy).toFixed(1)},${yOf(d.sunrise).toFixed(1)}`);
+  const mgPts = [...allData].filter(d=>d.maghrib!==null).reverse().map(d=>`${xOf(d.doy).toFixed(1)},${yOfPrayer('maghrib', d.maghrib).toFixed(1)}`);
+  const daylightPoints = srPts.length && mgPts.length ? srPts.join(' ')+' '+mgPts.join(' ') : '';
+  if(daylightPoints)
+    h+=`<polygon points="${daylightPoints}"
+      fill="rgba(255,210,70,0.18)" clip-path="url(#chartClip)"/>`;
+  // Dark minor grid lines clipped to daylight polygon (visible against yellow band)
+  if(daylightPoints){
+    h+=`<clipPath id="daylightClip"><polygon points="${daylightPoints}"/></clipPath>`;
+    for(let t=1; t<=24; t++){
+      const y=yOf(t);
+      if(y===null || y<MT || y>MT+CH) continue;
+      const isMajor=(t%6===0), isMid=(t%3===0);
+      if(isMajor||isMid) continue;
+      h+=`<line x1="${ML}" y1="${y.toFixed(1)}" x2="${ML+CW}" y2="${y.toFixed(1)}"
+        stroke="rgba(0,0,0,0.33)" stroke-width="0.75"
+        clip-path="url(#daylightClip)"/>`;
+    }
+  }
+
+  // ── Prayer lines — break path at DST transitions only ──
+  PR.forEach(({key,col,dash,label})=>{
+    // Split only at DST transitions (not at fallback transitions)
+    let segments = [];
+    let cur = null;
+    allData.forEach(d=>{
+      let rawH = d[key];
+      if(rawH===null){ cur=null; return; }
+      // Normalize to 0-24 range first
+      let h = ((rawH%24)+24)%24;
+      // For Maghrib/Isha after midnight in high-latitude cities,
+      // render as 24+h so the curve flows continuously near the 24 gridline.
+      if((key==='isha' || key==='maghrib') && (rawH>=24 || h < 3)) h = 24 + h;
+      const y = yOf_raw(h);
+      const valid = y!==null && y>=MT-18 && y<=MT+CH+10;
+      const isFb  = d.isFallback && (key==='fajr'||key==='isha');
+      const dstV  = d.dst||0;
+      if(!valid){ cur=null; return; }
+      if(!cur || cur.dst!==dstV){
+        cur={dst:dstV, pts:[]};
+        segments.push(cur);
+      }
+      cur.pts.push([xOf(d.doy), y, isFb]);
+    });
+
+    segments.forEach(seg=>{
+      if(seg.pts.length<2) return;
+      const isSunrise = key==='sunrise';
+
+      // Split segment into sub-runs by isFb so we can style differently
+      let runs=[], run=null;
+      seg.pts.forEach(p=>{
+        if(!run || run.fb!==p[2]){ run={fb:p[2],pts:[]}; runs.push(run); }
+        run.pts.push(p);
+      });
+
+      // Do NOT connect normal astronomical segments to fallback-estimated segments.
+      // High-latitude cities such as Helsinki/Oulu/Stockholm can switch modes
+      // around late spring/summer; connecting those modes creates broken-looking
+      // vertical jumps in the annual curve.
+      runs.forEach(r=>{
+        if(r.pts.length<2) return;
+        const pathD = r.pts.map((p,i)=>`${i===0?'M':'L'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join('');
+        const isFb  = r.fb;
+        const sw = isFb ? 2.5 : isSunrise ? 2.0 : 4.0;
+        const da = isSunrise ? '4,8' : '';
+        h+=`<path d="${pathD}" fill="none" stroke="${col}"
+          stroke-width="${sw}"
+          stroke-linecap="round" stroke-linejoin="round"
+          ${(dash||isSunrise)?`stroke-dasharray="${da}"`:'' }
+          clip-path="url(#chartClip)" opacity="0.88"/>`;
+      });
+    });
+
+    // Inline label — find a visible position along the curve
+    // Prefer mid-year; scan right if out of bounds (e.g. Isha past midnight in summer)
+    // For Isha near top edge, skip ahead one vertical grid (~90 days) to avoid Maghrib overlap
+    const VGRID = 30; // approx days per month
+    let labelDoy = 182;
+    let midY = yOfPrayer(key, allData[labelDoy][key]);
+    if(midY===null || midY<=MT+8 || midY>=MT+CH-8){
+      for(let scan=182; scan<=364; scan+=3){
+        const sy = yOfPrayer(key, allData[scan][key]);
+        if(sy!==null && sy>MT+12 && sy<MT+CH-12){ labelDoy=scan; midY=sy; break; }
+      }
+    }
+    // If label is still too close to top, shift one grid column right
+    if(midY!==null && midY < MT+22){
+      const shiftStart = labelDoy + VGRID;
+      for(let scan=shiftStart; scan<=364; scan+=3){
+        const sy = yOfPrayer(key, allData[scan][key]);
+        if(sy!==null && sy>MT+12 && sy<MT+CH-12){ labelDoy=scan; midY=sy; break; }
+      }
+    }
+    if(midY!==null && midY>MT+8 && midY<MT+CH-8){
+      const midX=xOf(labelDoy);
+      h+=`<text x="${midX.toFixed(1)}" y="${(midY-9).toFixed(1)}" text-anchor="middle"
+        font-size="11" font-family="DM Mono,monospace" font-weight="500"
+        fill="#07090e" stroke="#07090e" stroke-width="5" stroke-linejoin="round"
+        clip-path="url(#chartClip)">${label}</text>`;
+      h+=`<text x="${midX.toFixed(1)}" y="${(midY-9).toFixed(1)}" text-anchor="middle"
+        font-size="11" font-family="DM Mono,monospace" font-weight="500"
+        fill="${col}" clip-path="url(#chartClip)" opacity="0.9">${label}</text>`;
+    }
+  });
+
+  // ── DST switch vertical lines (the actual clock-change moments) ──
+  // Find day indices where dst flips
+  for(let i=1;i<allData.length;i++){
+    const prev=allData[i-1].dst||0, curr=allData[i].dst||0;
+    if(prev!==curr){
+      const x=xOf(i);
+      const topLabel=curr===1?'DST':'STD';
+      const col=curr===1?'rgba(200,151,58,0.7)':'rgba(130,150,180,0.6)';
+      // Vertical dashed line
+      h+=`<line x1="${x.toFixed(1)}" y1="${MT}" x2="${x.toFixed(1)}" y2="${MT+CH}"
+        stroke="${col}" stroke-width="1" stroke-dasharray="3,4"
+        clip-path="url(#chartClip)"/>`;
+      const anchor = 'start';
+      const lx = x+3;
+      // Bottom date label
+      const {mo, dy} = doyMD(i);
+      const dateLabel = `${MS[mo-1]} ${dy}`;
+      h+=`<text x="${lx.toFixed(1)}" y="${(MT+CH-10).toFixed(1)}" text-anchor="${anchor}"
+        font-size="14" font-family="DM Mono,monospace" fill="${col}" opacity="0.85"
+        clip-path="url(#chartClip)">${dateLabel}</text>`;
+      // DST/STD label just above the date label
+      h+=`<text x="${lx.toFixed(1)}" y="${(MT+CH-26).toFixed(1)}" text-anchor="${anchor}"
+        font-size="13" font-family="DM Mono,monospace" fill="${col}"
+        clip-path="url(#chartClip)">${topLabel}</text>`;
+    }
+  }
+
+  // Fallback legend note (only show for high-lat cities where it occurs)
+  const hasFallback = allData.some(d=>d.isFallback);
+  if(hasFallback){
+    h+=`<text x="${ML+26}" y="${MT+CH+34}" font-size="8" font-family="DM Mono,monospace"
+      fill="rgba(180,160,110,0.8)"></text>`;
+  }
+
+  // ── TODAY marker (vertical green line, always visible) ──
+  const todDoy=todayDoy();
+  const todX=xOf(todDoy);
+  h+=`<line x1="${todX.toFixed(1)}" y1="${MT}" x2="${todX.toFixed(1)}" y2="${MT+CH}"
+    stroke="rgba(88,200,120,0.25)" stroke-width="1.5" stroke-dasharray="3,3" clip-path="url(#chartClip)"/>`;
+  // Green tick at top of chart
+  h+=`<line x1="${todX.toFixed(1)}" y1="${MT-8}" x2="${todX.toFixed(1)}" y2="${MT}"
+    stroke="#58c878" stroke-width="2.5" stroke-linecap="round"/>`;
+  h+=`<circle cx="${todX.toFixed(1)}" cy="${MT}" r="3.5"
+    fill="#07090e" stroke="#58c878" stroke-width="2" filter="url(#glow)"/>`;
+  // "Today" label above green marker
+  h+=`<text x="${todX.toFixed(1)}" y="${(MT-15).toFixed(1)}" text-anchor="middle"
+    font-size="14" font-family="DM Mono,monospace" font-weight="500"
+    fill="#58c878" opacity="0.85">Today</text>`;
+  // ── NOW dot on today line ──
+  const {nowH: _nowH} = cityNow();
+  const nowY=yOf(_nowH);
+  if(nowY!==null && nowY>=MT && nowY<=MT+CH){
+    // Horizontal tick line
+    h+=`<line x1="${(todX-6).toFixed(1)}" y1="${nowY.toFixed(1)}" x2="${(todX+6).toFixed(1)}" y2="${nowY.toFixed(1)}"
+      stroke="#58c878" stroke-width="1.5" stroke-linecap="round"/>`;
+    // Filled dot
+    h+=`<circle cx="${todX.toFixed(1)}" cy="${nowY.toFixed(1)}" r="4"
+      fill="#58c878" stroke="#07090e" stroke-width="1.5" filter="url(#glow)"/>`;
+    // "Now" pill label beside the dot
+    const nowHH = String(Math.floor(_nowH)).padStart(2,'0');
+    const nowMM = String(Math.round((_nowH-Math.floor(_nowH))*60)).padStart(2,'0');
+    const nowLabel = `${nowHH}:${nowMM}`;
+    const nPillW = nowLabel.length * 14.5 + 20;
+    const nPillH = 38;
+    // Place pill to the left of the today line
+    const nPillX = todX - nPillW - 5;
+    const nPillY = nowY - nPillH/2;
+    h+=`<rect x="${nPillX.toFixed(1)}" y="${nPillY.toFixed(1)}"
+      width="${nPillW.toFixed(1)}" height="${nPillH}"
+      rx="3" fill="rgba(10,22,14,0.88)" stroke="rgba(88,200,120,0.45)" stroke-width="1"/>`;
+    h+=`<text x="${(nPillX+nPillW/2).toFixed(1)}" y="${(nPillY+27).toFixed(1)}"
+      text-anchor="middle" font-size="26" font-family="DM Mono,monospace"
+      font-weight="600" fill="rgba(88,200,120,0.95)" letter-spacing="0.5">${nowLabel}</text>`;
+  }
+
+  // ── HOVER preview (thin blue dashed vertical) ──
+  if(isHovering && hoverDoy!==needleDoy){
+    const hx=xOf(hoverDoy);
+    h+=`<line x1="${hx.toFixed(1)}" y1="${MT}" x2="${hx.toFixed(1)}" y2="${MT+CH}"
+      stroke="rgba(100,150,240,0.4)" stroke-width="1" stroke-dasharray="3,3" clip-path="url(#chartClip)"/>`;
+    // Hollow dots on prayer curves
+    const hd=allData[hoverDoy];
+    PR.forEach(({key,col})=>{
+      const y=yOfPrayer(key,hd[key]); if(y===null||y<MT||y>MT+CH) return;
+      h+=`<circle cx="${hx.toFixed(1)}" cy="${y.toFixed(1)}" r="4.5"
+        fill="rgba(100,150,240,0.1)" stroke="${col}" stroke-width="1.5" opacity="0.75"/>`;
+    });
+  }
+
+  // ── NEEDLE (gold solid vertical, draggable) ──
+  const nx=xOf(needleDoy);
+  // Glow
+  h+=`<rect x="${(nx-8).toFixed(1)}" y="${MT}" width="16" height="${CH}"
+    fill="rgba(232,200,70,0.04)" clip-path="url(#chartClip)"/>`;
+  // Line
+  h+=`<line x1="${nx.toFixed(1)}" y1="${MT}" x2="${nx.toFixed(1)}" y2="${MT+CH+2}"
+    stroke="#e8c840" stroke-width="${isHovering?1.2:2}" stroke-linecap="round"
+    opacity="${isHovering?.45:.9}" clip-path="url(#chartClip)"/>`;
+
+  // Filled dots on needle × prayer curves
+  const nd=allData[needleDoy];
+  PR.forEach(({key,col})=>{
+    const y=yOfPrayer(key,nd[key]); if(y===null||y<MT-4||y>MT+CH+4) return;
+    h+=`<circle cx="${nx.toFixed(1)}" cy="${y.toFixed(1)}" r="5.5"
+      fill="#07090e" stroke="${col}" stroke-width="2.8" opacity="${isHovering?.4:.9}"/>`;
+  });
+
+  // ── Floating date label above the active vertical line ──
+  // Shows for BOTH hover and needle — hover label is blue, needle is gold
+  const labelDoy  = activeDoy;
+  const labelX    = xOf(labelDoy);
+  const {mo, dy}  = doyMD(labelDoy);
+  const dateObj2  = new Date(new Date().getFullYear(), mo-1, dy);
+  const dayName   = DN[dateObj2.getDay()].slice(0,3).toUpperCase(); // MON, TUE…
+  const dateStr   = `${MS[mo-1]} ${dy}`;
+  const fullLabel = `${dayName}  ${dateStr}`;
+  const isHov     = isHovering;
+  const inRamadan = inRamadanDoy(labelDoy);
+  const isNeedle  = !isHovering; // needle label = not hovering
+  const isNeedleToday = isNeedle && labelDoy === todayDoy();
+  const lblCol    = isNeedleToday ? 'rgba(88,200,120,0.95)' : inRamadan ? 'rgba(200,140,255,0.95)' : isHov ? 'rgba(100,150,240,0.9)' : 'rgba(232,200,70,0.92)';
+  const bgCol     = isNeedleToday ? 'rgba(8,22,12,0.92)'   : inRamadan ? 'rgba(40,15,70,0.92)'   : isHov ? 'rgba(20,30,60,0.88)'   : 'rgba(30,22,8,0.88)';
+  const borderCol = isNeedleToday ? 'rgba(88,200,120,0.45)' : inRamadan ? 'rgba(180,100,255,0.5)' : isHov ? 'rgba(100,150,240,0.4)' : 'rgba(232,200,70,0.4)';
+
+  // Measure label width roughly (8px per char at font-size 14)
+  const lblW  = fullLabel.length * 13.5 + 20;
+  const lblH  = 38;
+  const lblY  = MT - lblH - 6;   // sits just above chart top edge
+  // Clamp so it never goes off left/right edge
+  const lblX  = Math.max(ML, Math.min(ML+CW-lblW, labelX - lblW/2));
+
+  // Background pill
+  h+=`<rect x="${lblX.toFixed(1)}" y="${lblY.toFixed(1)}"
+    width="${lblW.toFixed(1)}" height="${lblH}"
+    rx="3" fill="${bgCol}" stroke="${borderCol}" stroke-width="1"/>`;
+  // Text
+  h+=`<text x="${(lblX + lblW/2).toFixed(1)}" y="${(lblY + 27).toFixed(1)}"
+    text-anchor="middle" font-size="24" font-family="DM Mono,monospace"
+    font-weight="500" fill="${lblCol}" letter-spacing="0.5">${fullLabel}</text>`;
+  // Small downward tick connecting label to the line
+  const tickX = Math.min(ML+CW, Math.max(ML, labelX));
+  h+=`<line x1="${tickX.toFixed(1)}" y1="${(lblY+lblH).toFixed(1)}"
+    x2="${tickX.toFixed(1)}" y2="${MT}"
+    stroke="${lblCol}" stroke-width="1" opacity="0.5"/>`;
+
+  return h;
+}
+
+// ─── RENDER ──────────────────────────────────
+function render(){
+  // Always rebuild static so grid reflects current geometry
+  staticSVG = buildStatic();
+  document.getElementById('svg').innerHTML=staticSVG+buildDynamic();
+  updatePanel();
+}
+
+// ─── PANEL ───────────────────────────────────
+function updatePanel(){
+  const activeDoy=hoverDoy!==null?hoverDoy:needleDoy;
+  const isHovering=hoverDoy!==null;
+  const{mo,dy}=doyMD(activeDoy);
+  const todDoy=todayDoy(), isToday=(activeDoy===todDoy);
+
+  const dateEl=document.getElementById('pDate');
+  dateEl.textContent=`${MN[mo-1]} ${dy}`;
+  dateEl.className='p-date'+(isHovering?' is-hover':'');
+
+  const cityDisplayName = city==='__custom__' && customCity ? customCity.name : city;
+  const cityCountry = city==='__custom__' && customCity ? (customCity.country||'') : (CITIES[city]?.country||'');
+  const cityEntry = city==='__custom__' && customCity ? customCity : CITIES[city];
+  const cityUtc = utcLabelForEntry(cityEntry, activeDoy);
+  document.getElementById('pCityName').textContent = [
+    cityDisplayName,
+    cityCountry,
+    cityUtc
+  ].filter(Boolean).join(' · ');
+
+  const dateObj=new Date(new Date().getFullYear(),mo-1,dy);
+  const dayEl=document.getElementById('pDay');
+  const dstActive = allData[activeDoy]?.dst===1;
+  const dstTag = dstActive
+    ? `<span style="margin-left:6px;font-size:.52rem;padding:1px 5px;border-radius:2px;letter-spacing:.08em;background:rgba(200,151,58,.15);border:1px solid rgba(200,151,58,.3);color:#c8973a">DST</span>`
+    : '';
+  const inRamadanP = inRamadanDoy(activeDoy);
+  const ramadanTag = inRamadanP
+    ? `<span style="margin-left:6px;font-size:.52rem;padding:1px 5px;border-radius:2px;letter-spacing:.08em;background:rgba(160,80,255,.15);border:1px solid rgba(180,100,255,.35);color:#c090ff">Ramadan</span>`
+    : '';
+  dayEl.innerHTML=DN[dateObj.getDay()]+(isToday?'<span class="today-tag">Today</span>':'')+dstTag+ramadanTag;
+
+  const d=allData[activeDoy];
+  const nowH=isToday?cityNow().nowH:null;
+  const nk=nowH!==null?nextPrayer(d,nowH):null;
+
+  document.getElementById('pRows').innerHTML=PR.map(({key,label,ar,col})=>{
+    const{t,ap}=fmt(d[key]);
+    const isNext=(key===nk);
+    const isDimmed=nowH!==null&&!isNext&&d[key]!==null&&((d[key]%24+24)%24<nowH);
+    const isFb=d.isFallback&&(key==='fajr'||key==='isha');
+    return`<div class="prow${isNext?' next-up':''}${isDimmed?' dimmed':''}">
+      <div class="pbar" style="background:${col};opacity:${isNext?1:.5}"></div>
+      <div class="pinfo">
+        <div class="pname" style="color:${isNext?col:'#8898b8'}">${label}${isFb?'<span style="font-size:.5rem;color:#a08050;margin-left:4px;letter-spacing:.08em">EST</span>':''}</div>
+        <div class="parabic">${ar}</div>
+      </div>
+      <div class="ptime" style="color:${isNext?col:(isHovering?'#90a8d0':'#b8b0a0')}${isFb?';opacity:.7':''}">
+        ${t}<span class="pampm">${ap}</span>
+      </div>
+    </div>`;
+  }).join('');
+
+  const cdEl=document.getElementById('countdown');
+  if(isToday&&nk&&nowH!==null){
+    cdEl.style.display='block';
+    document.getElementById('cdVal').textContent=countdownStr(d,nk,nowH);
+  } else { cdEl.style.display='none'; }
+  document.querySelector('.jump-today').style.display = (needleDoy===todDoy) ? 'none' : '';
+}
+
+// ─── INTERACTION ─────────────────────────────
+function svgX(e){
+  const rect=document.getElementById('cw').getBoundingClientRect();
+  const svg=document.getElementById('svg');
+  const sx=svg.clientWidth/W;
+  const cx2=e.touches?e.touches[0].clientX:e.clientX;
+  return (cx2-rect.left)/sx;
+}
+function inChart(e){
+  const rect=document.getElementById('cw').getBoundingClientRect();
+  const svg=document.getElementById('svg');
+  const sx=svg.clientWidth/W, sy=svg.clientHeight/H;
+  const cx2=e.touches?e.touches[0].clientX:e.clientX;
+  const cy2=e.touches?e.touches[0].clientY:e.clientY;
+  const mx=(cx2-rect.left)/sx, my=(cy2-rect.top)/sy;
+  return mx>=ML && mx<=ML+CW && my>=MT && my<=MT+CH;
+}
+
+const cw=document.getElementById('cw');
+cw.addEventListener('mousedown',e=>{if(inChart(e)){dragging=true; e.preventDefault();}});
+cw.addEventListener('touchstart',e=>{if(inChart(e)){dragging=true;}},{passive:true});
+
+document.addEventListener('mousemove',e=>{
+  if(dragging){
+    needleDoy=doyFromX(svgX(e)); hoverDoy=null; render();
+  } else if(inChart(e)){
+    hoverDoy=doyFromX(svgX(e)); render();
+  } else if(hoverDoy!==null){
+    hoverDoy=null; render();
+  }
+});
+document.addEventListener('touchmove',e=>{
+  if(dragging){needleDoy=doyFromX(svgX(e));hoverDoy=null;render();}
+},{passive:true});
+document.addEventListener('mouseup',e=>{
+  if(dragging){
+    dragging=false;
+    needleDoy=doyFromX(svgX(e)); hoverDoy=null; render();
+  }
+});
+document.addEventListener('touchend',e=>{
+  if(dragging){
+    dragging=false;
+    if(e.changedTouches.length){
+      const rect=document.getElementById('cw').getBoundingClientRect();
+      const svg=document.getElementById('svg');
+      const sx=svg.clientWidth/W;
+      needleDoy=doyFromX((e.changedTouches[0].clientX-rect.left)/sx);
+    }
+    hoverDoy=null; render();
+  }
+});
+cw.addEventListener('mouseleave',()=>{if(hoverDoy!==null){hoverDoy=null;render();}});
+
+// ─── WORLD CITIES DATABASE ────────────────────
+const WORLD_CITIES = [
+  // Americas
+  { region:'Americas', name:'Los Angeles',    country:'USA',          lat:34.052,  lon:-118.244, tz:-8,  fa:15, ia:15, dst:'us'  },
+  { region:'Americas', name:'Chicago',        country:'USA',          lat:41.878,  lon:-87.630,  tz:-6,  fa:15, ia:15, dst:'us'  },
+  { region:'Americas', name:'Houston',        country:'USA',          lat:29.760,  lon:-95.370,  tz:-6,  fa:15, ia:15, dst:'us'  },
+  { region:'Americas', name:'Toronto',        country:'Canada',       lat:43.651,  lon:-79.347,  tz:-5,  fa:15, ia:15, dst:'us'  },
+  { region:'Americas', name:'Miami',          country:'USA',          lat:25.775,  lon:-80.208,  tz:-5,  fa:15, ia:15, dst:'us'  },
+  { region:'Americas', name:'Montreal',       country:'Canada',       lat:45.508,  lon:-73.588,  tz:-5,  fa:15, ia:15, dst:'us'  },
+  { region:'Americas', name:'Mexico City',    country:'Mexico',       lat:19.433,  lon:-99.133,  tz:-6,  fa:18, ia:17, dst:null  },
+  { region:'Americas', name:'São Paulo',      country:'Brazil',       lat:-23.550, lon:-46.633,  tz:-3,  fa:18, ia:17, dst:null  },
+  { region:'Americas', name:'Buenos Aires',   country:'Argentina',    lat:-34.614, lon:-58.442,  tz:-3,  fa:18, ia:17, dst:null  },
+  // Europe
+  { region:'Europe',   name:'Helsinki',      country:'Finland',      lat:60.169,  lon:24.938,   tz:2,   fa:12, ia:12, dst:'eu', highLat:true  },
+  { region:'Europe',   name:'Oulu',          country:'Finland',      lat:65.012,  lon:25.465,   tz:2,   fa:12, ia:12, dst:'eu', highLat:true  },
+  { region:'Europe',   name:'Zurich',        country:'Switzerland', lat:47.377,  lon:8.542,    tz:1,   fa:15, ia:15, dst:'eu'  },
+  { region:'Europe',   name:'Lisbon',        country:'Portugal',    lat:38.722,  lon:-9.139,   tz:0,   fa:18, ia:17, dst:'eu'  },
+  { region:'Europe',   name:'Paris',          country:'France',       lat:48.857,  lon:2.352,    tz:1,   fa:15, ia:15, dst:'eu'  },
+  { region:'Europe',   name:'Berlin',         country:'Germany',      lat:52.520,  lon:13.405,   tz:1,   fa:12, ia:12, dst:'eu'  },
+  { region:'Europe',   name:'Madrid',         country:'Spain',        lat:40.417,  lon:-3.703,   tz:1,   fa:18, ia:17, dst:'eu'  },
+  { region:'Europe',   name:'Rome',           country:'Italy',        lat:41.902,  lon:12.496,   tz:1,   fa:18, ia:17, dst:'eu'  },
+  { region:'Europe',   name:'Amsterdam',      country:'Netherlands',  lat:52.374,  lon:4.898,    tz:1,   fa:12, ia:12, dst:'eu'  },
+  { region:'Europe',   name:'Brussels',       country:'Belgium',      lat:50.850,  lon:4.352,    tz:1,   fa:15, ia:15, dst:'eu'  },
+  { region:'Europe',   name:'Vienna',         country:'Austria',      lat:48.208,  lon:16.373,   tz:1,   fa:18, ia:17, dst:'eu'  },
+  { region:'Europe',   name:'Stockholm',      country:'Sweden',       lat:59.333,  lon:18.065,   tz:1,   fa:7,  ia:7,  dst:'eu'  },
+  { region:'Europe',   name:'Oslo',           country:'Norway',       lat:59.913,  lon:10.752,   tz:1,   fa:6,  ia:6,  dst:'eu'  },
+  { region:'Europe',   name:'Copenhagen',     country:'Denmark',      lat:55.676,  lon:12.568,   tz:1,   fa:10, ia:10, dst:'eu'  },
+  { region:'Europe',   name:'Athens',         country:'Greece',       lat:37.979,  lon:23.716,   tz:2,   fa:18, ia:17, dst:'eu'  },
+  { region:'Europe',   name:'Warsaw',         country:'Poland',       lat:52.237,  lon:21.017,   tz:1,   fa:12, ia:12, dst:'eu'  },
+  { region:'Europe',   name:'Moscow',         country:'Russia',       lat:55.751,  lon:37.616,   tz:3,   fa:10, ia:10, dst:null  },
+  { region:'Europe',   name:'Istanbul',       country:'Turkey',       lat:41.015,  lon:28.979,   tz:3,   fa:18, ia:17, dst:null  },
+  // Middle East
+  { region:'Middle East', name:'Mecca',       country:'Saudi Arabia', lat:21.389,  lon:39.857,   tz:3,   fa:18, ia:17, dst:null  },
+  { region:'Middle East', name:'Medina',      country:'Saudi Arabia', lat:24.470,  lon:39.612,   tz:3,   fa:18, ia:17, dst:null  },
+  { region:'Middle East', name:'Riyadh',      country:'Saudi Arabia', lat:24.688,  lon:46.722,   tz:3,   fa:18, ia:17, dst:null  },
+  { region:'Middle East', name:'Dubai',       country:'UAE',          lat:25.204,  lon:55.270,   tz:4,   fa:18, ia:17, dst:null  },
+  { region:'Middle East', name:'Tehran',      country:'Iran',         lat:35.689,  lon:51.389,   tz:3.5, fa:18, ia:17, dst:'iran'},
+  { region:'Middle East', name:'Baghdad',     country:'Iraq',         lat:33.341,  lon:44.401,   tz:3,   fa:18, ia:17, dst:null  },
+  { region:'Middle East', name:'Beirut',      country:'Lebanon',      lat:33.889,  lon:35.495,   tz:2,   fa:18, ia:17, dst:'eu'  },
+  { region:'Middle East', name:'Amman',       country:'Jordan',       lat:31.956,  lon:35.945,   tz:2,   fa:18, ia:17, dst:null  },
+  { region:'Middle East', name:'Doha',        country:'Qatar',        lat:25.286,  lon:51.533,   tz:3,   fa:18, ia:17, dst:null  },
+  { region:'Middle East', name:'Kuwait City', country:'Kuwait',       lat:29.375,  lon:47.980,   tz:3,   fa:18, ia:17, dst:null  },
+  { region:'Middle East', name:'Karachi',     country:'Pakistan',     lat:24.861,  lon:67.010,   tz:5,   fa:18, ia:17, dst:null  },
+  // Africa
+  { region:'Africa',   name:'Cairo',          country:'Egypt',        lat:30.044,  lon:31.235,   tz:2,   fa:19.5,ia:17.5,dst:null},
+  { region:'Africa',   name:'Casablanca',     country:'Morocco',      lat:33.573,  lon:-7.589,   tz:1,   fa:18, ia:17, dst:null  },
+  { region:'Africa',   name:'Lagos',          country:'Nigeria',      lat:6.524,   lon:3.379,    tz:1,   fa:18, ia:17, dst:null  },
+  { region:'Africa',   name:'Nairobi',        country:'Kenya',        lat:-1.286,  lon:36.818,   tz:3,   fa:18, ia:17, dst:null  },
+  { region:'Africa',   name:'Accra',          country:'Ghana',        lat:5.614,   lon:-0.205,   tz:0,   fa:18, ia:17, dst:null  },
+  { region:'Africa',   name:'Dakar',          country:'Senegal',      lat:14.693,  lon:-17.447,  tz:0,   fa:18, ia:17, dst:null  },
+  { region:'Africa',   name:'Addis Ababa',    country:'Ethiopia',     lat:9.025,   lon:38.747,   tz:3,   fa:18, ia:17, dst:null  },
+  // Asia
+  { region:'Asia',     name:'Islamabad',      country:'Pakistan',     lat:33.729,  lon:73.094,   tz:5,   fa:18, ia:17, dst:null  },
+  { region:'Asia',     name:'Lahore',         country:'Pakistan',     lat:31.558,  lon:74.357,   tz:5,   fa:18, ia:17, dst:null  },
+  { region:'Asia',     name:'Mumbai',         country:'India',        lat:19.076,  lon:72.878,   tz:5.5, fa:18, ia:17, dst:null  },
+  { region:'Asia',     name:'Delhi',          country:'India',        lat:28.614,  lon:77.209,   tz:5.5, fa:18, ia:17, dst:null  },
+  { region:'Asia',     name:'Dhaka',          country:'Bangladesh',   lat:23.811,  lon:90.413,   tz:6,   fa:18, ia:17, dst:null  },
+  { region:'Asia',     name:'Colombo',        country:'Sri Lanka',    lat:6.927,   lon:79.862,   tz:5.5, fa:18, ia:17, dst:null  },
+  { region:'Asia',     name:'Kabul',          country:'Afghanistan',  lat:34.528,  lon:69.172,   tz:4.5, fa:18, ia:17, dst:null  },
+  { region:'Asia',     name:'Tashkent',       country:'Uzbekistan',   lat:41.299,  lon:69.240,   tz:5,   fa:18, ia:17, dst:null  },
+  { region:'Asia',     name:'Bangkok',        country:'Thailand',     lat:13.754,  lon:100.502,  tz:7,   fa:18, ia:17, dst:null  },
+  { region:'Asia',     name:'Bandung',        country:'Indonesia',    lat:-6.921,  lon:107.607,  tz:7,   fa:18, ia:17, dst:null  },
+  { region:'Asia',     name:'Singapore',      country:'Singapore',    lat:1.352,   lon:103.820,  tz:8,   fa:18, ia:17, dst:null  },
+  { region:'Asia',     name:'Manila',         country:'Philippines',  lat:14.599,  lon:120.984,  tz:8,   fa:18, ia:17, dst:null  },
+  { region:'Asia',     name:'Beijing',        country:'China',        lat:39.905,  lon:116.391,  tz:8,   fa:18, ia:17, dst:null  },
+  { region:'Asia',     name:'Shanghai',       country:'China',        lat:31.228,  lon:121.474,  tz:8,   fa:18, ia:17, dst:null  },
+  { region:'Asia',     name:'Tokyo',          country:'Japan',        lat:35.689,  lon:139.692,  tz:9,   fa:18, ia:17, dst:null  },
+  { region:'Asia',     name:'Seoul',          country:'South Korea',  lat:37.566,  lon:126.978,  tz:9,   fa:18, ia:17, dst:null  },
+  // Oceania
+  { region:'Oceania',  name:'Sydney',         country:'Australia',    lat:-33.869, lon:151.209,  tz:10,  fa:18, ia:17, dst:'au'   },
+  { region:'Oceania',  name:'Melbourne',      country:'Australia',    lat:-37.814, lon:144.963,  tz:10,  fa:18, ia:17, dst:'au'   },
+  { region:'Oceania',  name:'Perth',          country:'Australia',    lat:-31.952, lon:115.861,  tz:8,   fa:18, ia:17, dst:null  },
+  { region:'Oceania',  name:'Auckland',       country:'New Zealand',  lat:-36.867, lon:174.770,  tz:12,  fa:18, ia:17, dst:null  },
+];
+
+// Custom city from world list
+let customCity = null;
+
+function setCustomCity(idx){
+  if(idx==='' || idx===undefined) return;
+  const entry = WORLD_CITIES[parseInt(idx)];
+  if(!entry) return;
+  customCity = entry;
+  CITIES['__custom__'] = { country:entry.country||'', lat:entry.lat, lon:entry.lon, tz:entry.tz, fa:entry.fa, ia:entry.ia, dst:entry.dst, highLat:!!entry.highLat };
+  // Set city without rebuilding dropdown (would reset keyboard focus)
+  city = '__custom__';
+  needleDoy = todayDoy(); // recalculate today in the new city's timezone
+  staticSVG=''; precompute(); render();
+  updateButtonHighlights();
+  refreshAutoButton();
+}
+
+// ─── CITY / TODAY ─────────────────────────────
+
+function utcLabel(c, doy) {
+  return utcLabelForEntry(CITIES[c], doy);
+}
+
+function updateButtonHighlights() {
+  const doy = needleDoy;
+  // Update preset buttons active state
+  document.querySelectorAll('#cityPresetBtns .cbtn').forEach(btn => {
+    const c = btn.dataset.city;
+    btn.classList.toggle('active', c === city);
+    const country = CITIES[c]?.country || '';
+    const lbl = utcLabel(c, doy);
+    btn.querySelector('.cbtn-tz').textContent = (country ? country + ' · ' : '') + lbl;
+  });
+  // Update dropdown highlight
+  const sel = document.getElementById('cityDropdownSelect');
+  if(!sel) return;
+  if(city === '__custom__' && customCity){
+    const idx = WORLD_CITIES.findIndex(w=>w.name===customCity.name && w.region===customCity.region);
+    if(idx>=0) sel.value = String(idx);
+    sel.classList.add('active');
+  } else {
+    sel.value = '';
+    sel.classList.remove('active');
+  }
+}
+
+function buildCityUI() {
+  // Preset buttons (created once)
+  const presetDiv = document.getElementById('cityPresetBtns');
+  presetDiv.innerHTML = Object.keys(CITIES).filter(c=>c!=='__custom__').map(c => {
+    const country = CITIES[c].country || '';
+    const lbl = utcLabel(c, needleDoy);
+    return `<button class="cbtn${city===c?' active':''}" data-city="${c}" onclick="setCity('${c}')">
+      ${c}<span class="cbtn-tz">${country ? country + ' · ' : ''}${lbl}</span>
+    </button>`;
+  }).join('');
+
+  // Dropdown (created once, never recreated)
+  const dropDiv = document.getElementById('cityDropdownWrap');
+  if(dropDiv.children.length === 0){
+    const regionOrder = ['Americas','Europe','Middle East','Africa','Asia','Oceania'];
+    const regions = [
+      ...regionOrder.filter(r => WORLD_CITIES.some(c => c.region === r)),
+      ...[...new Set(WORLD_CITIES.map(c=>c.region))].filter(r => !regionOrder.includes(r))
+    ];
+    const opts = regions.map(r=>{
+      const cities = WORLD_CITIES
+        .map((c,i)=>({...c,i}))
+        .filter(c=>c.region===r)
+        .sort((a,b)=>
+          currentUtcSortValue(a) - currentUtcSortValue(b) ||
+          (a.country || '').localeCompare(b.country || '') ||
+          a.name.localeCompare(b.name)
+        );
+      return `<optgroup label="── ${r} ──">${cities.map(c=>`<option value="${c.i}">${c.name}${c.country?', '+c.country:''} · ${utcLabelForEntry(c)}</option>`).join('')}</optgroup>`;
+    }).join('');
+    dropDiv.innerHTML = `
+      <select id="cityDropdownSelect" class="city-dropdown" title="More cities…" aria-label="Select another city">
+        <option value="">+ More cities…</option>
+        ${opts}
+      </select>
+      <span class="dropdown-arrow">▾</span>`;
+    document.getElementById('cityDropdownSelect').addEventListener('change', e=>setCustomCity(e.target.value));
+    document.getElementById('cityDropdownSelect').addEventListener('input',  e=>setCustomCity(e.target.value));
+  }
+}
+
+// Kept for backward compat (called from render, setCity)
+function renderCityButtons() {
+  updateButtonHighlights();
+}
+
+function setCity(c){
+  city=c;
+  if(c !== '__custom__') customCity = null;
+  needleDoy = todayDoy(); // recalculate today in the new city's timezone
+  staticSVG=''; precompute(); render();
+  updateButtonHighlights();
+  refreshAutoButton();
+}
+function goToday(){needleDoy=todayDoy();hoverDoy=null;render();}
+
+setInterval(()=>{if(hoverDoy===null&&needleDoy===todayDoy())updatePanel();},30000);
+setInterval(()=>{ document.getElementById('svg').innerHTML=staticSVG+buildDynamic(); },60000);
+
+
+let hashMatchedSelection = false;
+
+// ─── URL HASH / DEFAULT CITY SELECTION ─────────
+function normalizePlaceName(s){
+  return decodeURIComponent(String(s || '').replace(/\+/g, ' '))
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function browserUtcOffset(){
+  // JS getTimezoneOffset returns minutes behind UTC. Example: PDT = 420 → UTC-7.
+  return -new Date().getTimezoneOffset() / 60;
+}
+
+function selectedCityEntry(){
+  return city === '__custom__' && customCity ? customCity : CITIES[city];
+}
+
+function currentCityMatchesBrowserTimezone(){
+  const entry = selectedCityEntry();
+  if(!entry) return true;
+  const browserTz = browserUtcOffset();
+  const cityTz = effectiveTzForEntryNow(entry);
+  return Math.abs(cityTz - browserTz) < 0.01;
+}
+
+function refreshAutoButton(){
+  const btn = document.getElementById('autoCityBtn');
+  if(!btn) return;
+  btn.hidden = currentCityMatchesBrowserTimezone();
+}
+
+function setAutoButtonVisible(show){
+  // Backward-compatible wrapper: explicit hash match may call this,
+  // but final visibility is based on whether the selected city timezone
+  // differs from the browser timezone.
+  refreshAutoButton();
+}
+
+function removeHashSilently(){
+  if(location.hash){
+    history.replaceState(null, '', location.pathname + location.search);
+  }
+}
+
+function clearCityHashToAuto(){
+  removeHashSilently();
+  hashMatchedSelection = false;
+  setAutoButtonVisible(false);
+  autoSelectByBrowserTimezone();
+  refreshAutoButton();
+}
+
+
+function effectiveTzForEntryNow(entry){
+  if(!entry) return 0;
+  const now = new Date();
+  const doy = mdDoy(now.getMonth()+1, now.getDate());
+  const {mo,dy} = doyMD(doy);
+  return entry.tz + dstOffsetByRule(entry.dst, now.getFullYear(), mo, dy);
+}
+
+function allSelectableCities(){
+  return [
+    ...Object.keys(CITIES)
+      .filter(name => name !== '__custom__')
+      .map(name => ({ name, preset:true, entry:CITIES[name] })),
+    ...WORLD_CITIES.map((entry, index) => ({ name:entry.name, preset:false, entry, index }))
+  ];
+}
+
+function selectWorldCityByIndex(index){
+  const entry = WORLD_CITIES[index];
+  if(!entry) return false;
+  customCity = entry;
+  CITIES['__custom__'] = {
+    country:entry.country||'', lat:entry.lat, lon:entry.lon, tz:entry.tz,
+    fa:entry.fa, ia:entry.ia, dst:entry.dst, highLat:!!entry.highLat
+  };
+  city = '__custom__';
+  needleDoy = todayDoy();
+  staticSVG='';
+  precompute();
+  render();
+  updateButtonHighlights();
+  return true;
+}
+
+function applyCityMatch(match){
+  if(!match) return false;
+  if(match.preset) {
+    setCity(match.name);
+    return true;
+  }
+  return selectWorldCityByIndex(match.index);
+}
+
+function autoSelectFromHash(){
+  const raw = (location.hash || '').replace(/^#/, '');
+  const key = normalizePlaceName(raw);
+
+  if(!key) {
+    hashMatchedSelection = false;
+    setAutoButtonVisible(false);
+    return false;
+  }
+
+  const candidates = allSelectableCities();
+
+  // 1) Exact city match, e.g. #Los+Angeles, #helsinki, #oulu.
+  const cityMatch = candidates.find(c => normalizePlaceName(c.name) === key);
+  if(cityMatch) {
+    hashMatchedSelection = true;
+    setAutoButtonVisible(true);
+    return applyCityMatch(cityMatch);
+  }
+
+  // 2) Exact country match, e.g. #Indonesia or #Finland.
+  // For Finland, prefer the high-latitude example if available.
+  const countryMatches = candidates.filter(c => normalizePlaceName(c.entry.country) === key);
+  const countryMatch = countryMatches.find(c => c.entry.highLat) || countryMatches[0];
+  if(countryMatch) {
+    hashMatchedSelection = true;
+    setAutoButtonVisible(true);
+    return applyCityMatch(countryMatch);
+  }
+
+  // Unknown hash: remove it so the page falls back to browser timezone auto-detect.
+  removeHashSilently();
+  hashMatchedSelection = false;
+  setAutoButtonVisible(false);
+  return false;
+}
+
+function autoSelectByBrowserTimezone(){
+  const userTz = browserUtcOffset();
+  const candidates = allSelectableCities();
+  let best = candidates[0];
+
+  candidates.forEach(c => {
+    const diff = Math.abs(effectiveTzForEntryNow(c.entry) - userTz);
+    const bestDiff = Math.abs(effectiveTzForEntryNow(best.entry) - userTz);
+
+    // Prefer preset city on tie because it keeps the first-screen UI cleaner.
+    if(diff < bestDiff || (diff === bestDiff && c.preset && !best.preset)) {
+      best = c;
+    }
+  });
+
+  applyCityMatch(best);
+  refreshAutoButton();
+}
+
+function initializeSelectedCity(){
+  if(!autoSelectFromHash()) autoSelectByBrowserTimezone();
+}
+
+window.addEventListener('hashchange', () => {
+  if(!autoSelectFromHash()) autoSelectByBrowserTimezone();
+});
+
+console.info(`PrayerChart · ${PRAYERCHART_AUTHOR} · ${PC_BUILD_ID}`);
+
+// ─── INIT ─────────────────────────────────────
+buildCityUI();
+initializeSelectedCity();
+refreshAutoButton();
